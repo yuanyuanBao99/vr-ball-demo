@@ -2,257 +2,366 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>VR Ball with Speed Curve (A-Frame)</title>
+    <title>VR Ball — Trajectories + Speed Curve</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <!-- 在线版：可换成本地 libs/aframe.min.js -->
     <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
     <style>
-      .panel {
-        position: fixed; left: 12px; top: 12px; z-index: 9999;
-        background: rgba(255,255,255,.9); padding: 10px 12px; border-radius: 10px;
-        font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, Arial;
-        box-shadow: 0 8px 24px rgba(0,0,0,.1); max-width: 320px;
-      }
-      .row { margin: 8px 0; }
-      .row label { display:block; font-weight:600; margin-bottom:4px; }
-      .row input[type="range"] { width:100%; }
-      .row input[type="number"], .row select { width:100%; box-sizing:border-box; }
-      .row textarea { width:100%; height:96px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-      .muted { color:#666; font-size:12px; }
-      .inline { display:flex; gap:8px; align-items:center; }
-      .inline > * { flex:1; }
-      .ok { color:#0a7; font-weight:600; }
-      .err { color:#c00; font-weight:600; }
+      .panel{position:fixed;left:12px;top:12px;z-index:9;background:rgba(255,255,255,.92);
+        padding:12px;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.12);
+        font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:340px}
+      .row{margin:8px 0}
+      .row label{display:block;font-weight:600;margin-bottom:4px}
+      .row input[type="range"]{width:100%}
+      .row input[type="number"],.row select{width:100%;box-sizing:border-box}
+      .row textarea{width:100%;height:96px;font-family:ui-monospace,Consolas,monospace}
+      .grid{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+      .muted{color:#666;font-size:12px}
+      .ok{color:#0a7;font-weight:600}.err{color:#c00;font-weight:600}
     </style>
-
     <script>
-      // —— 工具：线性插值 & 包裹取模
+      // ---------- 工具 ----------
       const clamp01 = x => Math.max(0, Math.min(1, x));
       const lerp = (a,b,t) => a + (b-a)*t;
-      const wrap = (x, L) => { if (L<=0) return 0; x%=L; return x<0? x+L : x; };
+      const wrap = (x,L)=>{ if(L<=0)return 0; x%=L; return x<0?x+L:x; };
 
-      // —— 速度曲线求值器
-      // mode = 'constant' | 'sine' | 'keyframes'
-      class SpeedCurve {
-        constructor(opts){
-          this.mode = opts.mode || 'constant';
-          this.base = opts.base ?? 1.2;         // m/s
-          this.amp  = opts.amp  ?? 0.6;         // m/s
-          this.freq = opts.freq ?? 0.5;         // Hz
-          this.phase= opts.phase?? 0.0;         // rad
-          this.kf   = Array.isArray(opts.keyframes) ? opts.keyframes.slice() : []; // [[t,speed],...]
-          this.kf.sort((a,b)=>a[0]-b[0]);
-          this._dur = this.kf.length>0 ? this.kf[this.kf.length-1][0] : 0;
+      // ---------- 速度曲线 ----------
+      class SpeedCurve{
+        constructor(o={}){
+          this.mode=o.mode||'constant';
+          this.base=o.base??1.2; this.amp=o.amp??0.6; this.freq=o.freq??0.5; this.phase=o.phase??0;
+          this.kf=Array.isArray(o.keyframes)?o.keyframes.slice():[];
+          this.kf.sort((a,b)=>a[0]-b[0]); this._dur=this.kf.length?this.kf[this.kf.length-1][0]:0;
         }
-        get duration(){ return this._dur; }
-
-        eval(tSec){
-          if (this.mode === 'constant'){
-            return Math.max(0, this.base);
+        get duration(){return this._dur;}
+        eval(t){
+          if(this.mode==='constant') return Math.max(0,this.base);
+          if(this.mode==='sine') return Math.max(0,this.base+this.amp*Math.sin(2*Math.PI*this.freq*t+this.phase));
+          if(this.mode==='keyframes'){
+            if(!this.kf.length) return Math.max(0,this.base);
+            const T=this._dur, tt=T>0?wrap(t,T):0;
+            let i=1; while(i<this.kf.length&&this.kf[i][0]<tt) i++;
+            const p1=this.kf[i%this.kf.length], p0=this.kf[(i-1+this.kf.length)%this.kf.length];
+            const [t0,s0]=p0,[t1,s1]=p1;
+            const span=(t1>t0)?(t1-t0):(t1+T-t0), dt=(tt>=t0)?(tt-t0):(tt+T-t0);
+            const u=span>1e-6?dt/span:0; return Math.max(0, lerp(s0,s1,clamp01(u)));
           }
-          if (this.mode === 'sine'){
-            // v(t) = base + amp * sin(2π f t + phase)
-            return Math.max(0, this.base + this.amp * Math.sin(2*Math.PI*this.freq*tSec + this.phase));
-          }
-          if (this.mode === 'keyframes'){
-            if (this.kf.length===0) return Math.max(0, this.base);
-            const T = this._dur;
-            const tt = T>0 ? wrap(tSec, T) : 0;
-            // 找到 tt 所在的段
-            let i=1;
-            while (i<this.kf.length && this.kf[i][0] < tt) i++;
-            const p1 = this.kf[i % this.kf.length];
-            const p0 = this.kf[(i-1 + this.kf.length)%this.kf.length];
-            const t0 = p0[0], s0 = p0[1];
-            const t1 = p1[0], s1 = p1[1];
-            const span = (t1>t0) ? (t1-t0) : (t1 + T - t0); // 跨越末尾时包裹
-            const dt = (tt>=t0) ? (tt - t0) : (tt + T - t0);
-            const u = span>1e-6 ? dt/span : 0;
-            return Math.max(0, lerp(s0, s1, clamp01(u)));
-          }
-          return Math.max(0, this.base);
+          return Math.max(0,this.base);
         }
       }
 
-      // —— 运动组件（先实现圆周轨迹 + 速度曲线）
-      AFRAME.registerComponent('circle-with-speedcurve', {
-        schema: {
-          radius:  {type:'number', default: 1.4},     // 轨道半径 (m)
-          center:  {type:'vec3',   default:{x:0,y:1.2,z:-2}},
-          // 速度曲线参数（初始值；运行中可由 UI 改）
-          mode:    {type:'string', default:'constant'}, // constant | sine | keyframes
-          base:    {type:'number', default:1.2},
-          amp:     {type:'number', default:0.6},
-          freq:    {type:'number', default:0.5},
-          phase:   {type:'number', default:0.0},
-          // keyframes 通过外部 JSON 传入（见下方 UI），这里不放到 schema 里
+      // ---------- 弧长 LUT（样条用） ----------
+      function buildArcLUT(curve, samples=400){
+        const u=[], s=[0]; u.push(0);
+        let total=0, prev=curve.getPoint(0);
+        for(let i=1;i<=samples;i++){
+          const uu=i/samples, p=curve.getPoint(uu);
+          total += p.distanceTo(prev);
+          u.push(uu); s.push(total); prev=p;
+        }
+        return {u,s,total};
+      }
+      function uFromDistance(lut, dist){
+        const {u,s,total}=lut;
+        let d=wrap(dist,total);
+        // 二分
+        let lo=0, hi=s.length-1;
+        while(lo<hi){
+          const mid=(lo+hi)>>1;
+          if(s[mid]<d) lo=mid+1; else hi=mid;
+        }
+        const i=Math.max(1,lo), s0=s[i-1], s1=s[i], u0=u[i-1], u1=u[i];
+        if(s1===s0) return u0;
+        return u0 + (d - s0) * (u1 - u0) / (s1 - s0);
+      }
+
+      // ---------- 统一运动组件 ----------
+      AFRAME.registerComponent('motion-with-speedcurve',{
+        schema:{
+          trajectory:{type:'string',default:'circle'}, // circle|lissajous|spline|random
+          center:{type:'vec3',default:{x:0,y:1.2,z:-2}},
+          // circle
+          radius:{type:'number',default:1.4},
+          // lissajous: p(u)=c + [Ax sin(fx u), Ay sin(fy u+π/2), Az sin(fz u+π/3)]
+          lAx:{type:'number',default:1.2}, lAy:{type:'number',default:0.8}, lAz:{type:'number',default:1.0},
+          lFx:{type:'number',default:1.0}, lFy:{type:'number',default:1.5}, lFz:{type:'number',default:0.6},
+          // random bounds
+          useBounds:{type:'boolean',default:true},
+          bounds:{type:'vec3',default:{x:3,y:1.5,z:3}},
+          // speed curve (初始，可被 UI 改)
+          mode:{type:'string',default:'constant'}, base:{type:'number',default:1.2},
+          amp:{type:'number',default:0.6}, freq:{type:'number',default:0.5}, phase:{type:'number',default:0}
         },
         init(){
-          this.t = 0;                // 运行时间（秒）
-          this.angle = 0;            // 当前角度（弧度）
-          this.curve = new SpeedCurve({
-            mode: this.data.mode,
-            base: this.data.base,
-            amp:  this.data.amp,
-            freq: this.data.freq,
-            phase:this.data.phase,
-            keyframes:[]
-          });
+          this.t=0; this.angle=0;
+          this.curve=new SpeedCurve({mode:this.data.mode,base:this.data.base,amp:this.data.amp,freq:this.data.freq,phase:this.data.phase});
+          // random
+          this.dir=new THREE.Vector3(1,0.3,0.7).normalize();
+          this.noiseT=0;
+          // spline
+          this.spline=null; this.lut=null; this.sDist=0;
+          const wp=document.querySelector('#waypoints');
+          if(wp){
+            const pts=[];
+            wp.querySelectorAll('[position]').forEach(n=>{
+              const p=n.getAttribute('position'); pts.push(new THREE.Vector3(p.x,p.y,p.z));
+            });
+            if(pts.length>=2){
+              this.spline=new THREE.CatmullRomCurve3(pts,true,'centripetal',0.5);
+              this.lut=buildArcLUT(this.spline,600);
+              // 可视化
+              const geo=new THREE.BufferGeometry().setFromPoints(this.spline.getPoints(300));
+              const mat=new THREE.LineBasicMaterial({color:0x888888});
+              const line=new THREE.Line(geo,mat); wp.object3D.add(line);
+            }
+          }
+          // 预置：把球放到起点
+          const c=this.data.center;
+          this.el.object3D.position.set(c.x+this.data.radius, c.y, c.z);
         },
-        update(oldData){
-          // 当属性变化时（例如 UI 改了），刷新曲线
-          this.curve.mode  = this.data.mode;
-          this.curve.base  = this.data.base;
-          this.curve.amp   = this.data.amp;
-          this.curve.freq  = this.data.freq;
-          this.curve.phase = this.data.phase;
-          // keyframes 由外部 setter 注入
+        update(){
+          this.curve.mode=this.data.mode; this.curve.base=this.data.base;
+          this.curve.amp=this.data.amp; this.curve.freq=this.data.freq; this.curve.phase=this.data.phase;
         },
         tick(time, timeDelta){
-          const dt = timeDelta/1000;
-          this.t += dt;
+          const dt=timeDelta/1000; this.t+=dt;
+          const v=this.curve.eval(this.t); // 线速度 m/s
+          const c=this.data.center; const pos=this.el.object3D.position;
 
-          // 由速度曲线得到 v(t)，再积分角速度： dθ/dt = v/r
-          const r = Math.max(0.001, this.data.radius);
-          const v = this.curve.eval(this.t);     // m/s
-          const omega = v / r;                   // rad/s
-          this.angle += omega * dt;
+          if(this.data.trajectory==='circle'){
+            const r=Math.max(0.001,this.data.radius);
+            const omega=v/r; this.angle+=omega*dt;
+            pos.set(c.x + r*Math.cos(this.angle), c.y, c.z + r*Math.sin(this.angle));
+            return;
+          }
 
-          const cx = this.data.center.x, cy = this.data.center.y, cz = this.data.center.z;
-          const x = cx + r * Math.cos(this.angle);
-          const z = cz + r * Math.sin(this.angle);
-          this.el.object3D.position.set(x, cy, z);
+          if(this.data.trajectory==='lissajous'){
+            // p(u)=c+[Ax sin(fx u), Ay sin(fy u+π/2), Az sin(fz u+π/3)]
+            // |dp/du| = sqrt( (Ax*fx cos(fx u))^2 + (Ay*fy cos(...))^2 + (Az*fz cos(...))^2 )
+            if(this.u===undefined) this.u=0;
+            // 用两步欧拉以减小误差
+            for(let k=0;k<2;k++){
+              const du1=this._duForV(this.u,v,dt/2);
+              this.u+=du1;
+            }
+            const x = c.x + this.data.lAx*Math.sin(this.data.lFx*this.u);
+            const y = c.y + this.data.lAy*Math.sin(this.data.lFy*this.u + Math.PI/2);
+            const z = c.z + this.data.lAz*Math.sin(this.data.lFz*this.u + Math.PI/3);
+            pos.set(x,y,z);
+            return;
+          }
+
+          if(this.data.trajectory==='spline' && this.spline && this.lut){
+            this.sDist += v*dt; // 累计路程
+            const u = uFromDistance(this.lut, this.sDist);
+            const p = this.spline.getPoint(u);
+            pos.copy(p);
+            return;
+          }
+
+          if(this.data.trajectory==='random'){
+            // 抖动方向
+            this.noiseT+=dt;
+            if(this.noiseT>0.4){ this.noiseT=0;
+              const j=new THREE.Vector3((Math.random()-0.5)*0.6,(Math.random()-0.5)*0.6,(Math.random()-0.5)*0.6);
+              this.dir.add(j).normalize();
+            }
+            const step=v*dt; pos.addScaledVector(this.dir, step);
+            if(this.data.useBounds){
+              const min=new THREE.Vector3(c.x-this.data.bounds.x/2,c.y-this.data.bounds.y/2,c.z-this.data.bounds.z/2);
+              const max=new THREE.Vector3(c.x+this.data.bounds.x/2,c.y+this.data.bounds.y/2,c.z+this.data.bounds.z/2);
+              if(pos.x<min.x||pos.x>max.x){ this.dir.x*=-1; pos.x=THREE.MathUtils.clamp(pos.x,min.x,max.x); }
+              if(pos.y<min.y||pos.y>max.y){ this.dir.y*=-1; pos.y=THREE.MathUtils.clamp(pos.y,min.y,max.y); }
+              if(pos.z<min.z||pos.z>max.z){ this.dir.z*=-1; pos.z=THREE.MathUtils.clamp(pos.z,min.z,max.z); }
+            }
+            return;
+          }
         },
-        // 让外部能动态设置关键帧
-        setKeyframes(arr){
-          // arr: [[timeSec, speed], ...]，time 单调递增，speed>=0
-          this.curve = new SpeedCurve({
-            mode: 'keyframes',
-            keyframes: arr
-          });
-          this.el.setAttribute('circle-with-speedcurve', 'mode', 'keyframes');
-        }
+        _duForV(u,v,dt){
+          const Ax=this.data.lAx, Ay=this.data.lAy, Az=this.data.lAz;
+          const fx=this.data.lFx, fy=this.data.lFy, fz=this.data.lFz;
+          const dx = Ax*fx*Math.cos(fx*u);
+          const dy = Ay*fy*Math.cos(fy*u + Math.PI/2);
+          const dz = Az*fz*Math.cos(fz*u + Math.PI/3);
+          const dlen = Math.max(1e-6, Math.hypot(dx,dy,dz)); // |dp/du|
+          const du_dt = v / dlen; // 让 |dp/dt| = v
+          return du_dt * dt;
+        },
+        // 供外部设置关键帧
+        setKeyframes(arr){ this.curve=new SpeedCurve({mode:'keyframes',keyframes:arr}); this.el.setAttribute('motion-with-speedcurve','mode','keyframes'); }
       });
 
-      // —— 绑定 UI
+      // ---------- 简易 UI 绑定 ----------
       window.addEventListener('DOMContentLoaded', ()=>{
-        const sphere = document.querySelector('#ball');
+        const ball = document.querySelector('#ball');
 
-        const modeSel = document.getElementById('mode');
-        const baseInp = document.getElementById('base');
-        const baseVal = document.getElementById('baseVal');
-        const ampInp  = document.getElementById('amp');
-        const ampVal  = document.getElementById('ampVal');
-        const freqInp = document.getElementById('freq');
-        const freqVal = document.getElementById('freqVal');
-        const phaseInp= document.getElementById('phase');
-        const phaseVal= document.getElementById('phaseVal');
-        const kfArea  = document.getElementById('kfjson');
-        const kfBtn   = document.getElementById('applyKf');
-        const kfMsg   = document.getElementById('kfmsg');
+        const mode = document.getElementById('mode');
+        const base = document.getElementById('base'), baseVal=document.getElementById('baseVal');
+        const amp  = document.getElementById('amp'),  ampVal =document.getElementById('ampVal');
+        const freq = document.getElementById('freq'), freqVal=document.getElementById('freqVal');
+        const phase= document.getElementById('phase'),phaseVal=document.getElementById('phaseVal');
 
-        function apply(){
-          sphere.setAttribute('circle-with-speedcurve', {
-            mode: modeSel.value,
-            base: parseFloat(baseInp.value),
-            amp:  parseFloat(ampInp.value),
-            freq: parseFloat(freqInp.value),
-            phase:parseFloat(phaseInp.value)
+        const traj = document.getElementById('traj');
+        const radius=document.getElementById('radius');
+        const lAx=document.getElementById('lAx'), lAy=document.getElementById('lAy'), lAz=document.getElementById('lAz');
+        const lFx=document.getElementById('lFx'), lFy=document.getElementById('lFy'), lFz=document.getElementById('lFz');
+        const useB=document.getElementById('useB');
+        const bx=document.getElementById('bx'), by=document.getElementById('by'), bz=document.getElementById('bz');
+
+        const kfArea=document.getElementById('kfjson'), kfBtn=document.getElementById('applyKf'), kfMsg=document.getElementById('kfmsg');
+
+        function applySpeed(){
+          ball.setAttribute('motion-with-speedcurve',{
+            mode:mode.value,
+            base:parseFloat(base.value),
+            amp:parseFloat(amp.value),
+            freq:parseFloat(freq.value),
+            phase:parseFloat(phase.value)
           });
-          baseVal.textContent = baseInp.value;
-          ampVal.textContent  = ampInp.value;
-          freqVal.textContent = freqInp.value;
-          phaseVal.textContent= phaseInp.value;
+          baseVal.textContent=base.value; ampVal.textContent=amp.value;
+          freqVal.textContent=freq.value; phaseVal.textContent=phase.value;
         }
-        [modeSel, baseInp, ampInp, freqInp, phaseInp].forEach(el=>{
-          el.addEventListener('input', apply);
-        });
-        apply();
+        [mode,base,amp,freq,phase].forEach(el=>el.addEventListener('input',applySpeed));
+        applySpeed();
+
+        function applyTraj(){
+          const data={
+            trajectory: traj.value,
+            radius: parseFloat(radius.value),
+            lAx:parseFloat(lAx.value), lAy:parseFloat(lAy.value), lAz:parseFloat(lAz.value),
+            lFx:parseFloat(lFx.value), lFy:parseFloat(lFy.value), lFz:parseFloat(lFz.value),
+            useBounds: useB.checked,
+            bounds: `${parseFloat(bx.value)} ${parseFloat(by.value)} ${parseFloat(bz.value)}`
+          };
+          ball.setAttribute('motion-with-speedcurve', data);
+        }
+        [traj,radius,lAx,lAy,lAz,lFx,lFy,lFz,useB,bx,by,bz].forEach(el=>el.addEventListener('input',applyTraj));
+        applyTraj();
 
         kfBtn.addEventListener('click', ()=>{
           try{
-            const arr = JSON.parse(kfArea.value);
-            if (!Array.isArray(arr)) throw new Error('需要数组');
-            // 简单校验
-            for (const p of arr){
-              if (!Array.isArray(p) || p.length!==2) throw new Error('每个关键帧应为 [timeSec, speed]');
-              if (typeof p[0]!=='number' || typeof p[1]!=='number') throw new Error('time/speed 必须是数字');
-              if (p[0]<0 || p[1]<0) throw new Error('time/speed 不能为负');
+            const arr=JSON.parse(kfArea.value);
+            if(!Array.isArray(arr)) throw new Error('需要数组');
+            for(const p of arr){
+              if(!Array.isArray(p)||p.length!==2) throw new Error('每个关键帧应为 [timeSec, speed]');
+              if(typeof p[0]!=='number'||typeof p[1]!=='number') throw new Error('time/speed 必须是数字');
+              if(p[0]<0||p[1]<0) throw new Error('time/speed 不能为负');
             }
-            // 设置
-            document.querySelector('#ball').components['circle-with-speedcurve'].setKeyframes(arr);
-            kfMsg.textContent = '已应用关键帧 ✅';
-            kfMsg.className = 'ok';
-            modeSel.value = 'keyframes';
+            ball.components['motion-with-speedcurve'].setKeyframes(arr);
+            kfMsg.textContent='已应用关键帧 ✅'; kfMsg.className='ok';
+            mode.value='keyframes';
           }catch(e){
-            kfMsg.textContent = '关键帧 JSON 有误：' + e.message;
-            kfMsg.className = 'err';
+            kfMsg.textContent='关键帧 JSON 有误：'+e.message; kfMsg.className='err';
           }
         });
       });
     </script>
   </head>
   <body>
-    <!-- 控制面板 -->
     <div class="panel">
       <div class="row">
-        <label>速度模式 (mode)</label>
+        <label>轨迹 (trajectory)</label>
+        <select id="traj">
+          <option value="circle">circle（圆周）</option>
+          <option value="lissajous">lissajous（三维）</option>
+          <option value="spline">spline（样条/路标）</option>
+          <option value="random">random（边界盒反弹）</option>
+        </select>
+      </div>
+
+      <div class="grid">
+        <div class="row">
+          <label>circle 半径 r</label>
+          <input id="radius" type="number" step="0.1" value="1.4">
+        </div>
+        <div class="row">
+          <label>边界启用（random）</label>
+          <input id="useB" type="checkbox" checked>
+        </div>
+        <div class="row">
+          <label>bounds X</label><input id="bx" type="number" step="0.1" value="3">
+        </div>
+        <div class="row">
+          <label>bounds Y</label><input id="by" type="number" step="0.1" value="1.5">
+        </div>
+        <div class="row">
+          <label>bounds Z</label><input id="bz" type="number" step="0.1" value="3">
+        </div>
+      </div>
+
+      <div class="row"><label>Lissajous 振幅 (Ax,Ay,Az)</label>
+        <div class="grid">
+          <input id="lAx" type="number" step="0.1" value="1.2">
+          <input id="lAy" type="number" step="0.1" value="0.8">
+        </div>
+        <input id="lAz" type="number" step="0.1" value="1.0">
+      </div>
+      <div class="row"><label>Lissajous 频率 (fx,fy,fz)</label>
+        <div class="grid">
+          <input id="lFx" type="number" step="0.1" value="1.0">
+          <input id="lFy" type="number" step="0.1" value="1.5">
+        </div>
+        <input id="lFz" type="number" step="0.1" value="0.6">
+      </div>
+
+      <div class="row">
+        <label>速度曲线模式</label>
         <select id="mode">
           <option value="constant">constant（常数）</option>
           <option value="sine">sine（正弦）</option>
           <option value="keyframes">keyframes（关键帧）</option>
         </select>
       </div>
-
-      <div class="row">
-        <label>base 速度（m/s）：<span id="baseVal">1.2</span></label>
+      <div class="row"><label>base 速度（m/s）：<span id="baseVal">1.2</span></label>
         <input id="base" type="range" min="0" max="5" step="0.1" value="1.2">
       </div>
-
-      <div class="row">
-        <label>amp 幅度（m/s）：<span id="ampVal">0.6</span></label>
+      <div class="row"><label>amp 幅度（m/s）：<span id="ampVal">0.6</span></label>
         <input id="amp" type="range" min="0" max="5" step="0.1" value="0.6">
       </div>
-
-      <div class="row">
-        <label>freq 频率（Hz）：<span id="freqVal">0.5</span></label>
+      <div class="row"><label>freq 频率（Hz）：<span id="freqVal">0.5</span></label>
         <input id="freq" type="range" min="0" max="2" step="0.05" value="0.5">
       </div>
-
-      <div class="row">
-        <label>phase 相位（rad）：<span id="phaseVal">0.0</span></label>
+      <div class="row"><label>phase 相位（rad）：<span id="phaseVal">0.0</span></label>
         <input id="phase" type="range" min="-6.283" max="6.283" step="0.01" value="0.0">
       </div>
 
       <div class="row">
-        <label>关键帧 JSON（[timeSec, speed]，线性插值，自动循环）</label>
+        <label>关键帧 JSON（[timeSec, speed]，线性插值，循环）</label>
         <textarea id="kfjson">[
-  [0,   0.4],
+  [0.0, 0.6],
   [1.0, 2.0],
   [2.0, 0.8],
   [3.0, 3.5]
 ]</textarea>
-        <div class="inline">
+        <div class="row">
           <button id="applyKf">应用关键帧</button>
-          <span id="kfmsg" class="muted">例：0s→0.4 m/s → 1s→2.0 m/s ...</span>
+          <span id="kfmsg" class="muted">点击生效</span>
         </div>
       </div>
 
-      <div class="row muted">
-        小贴士：正弦模式下速度可能为负，已自动钳为 ≥ 0；关键帧会按最后一个 time 作为总时长循环。
-      </div>
+      <div class="row muted">提示：spline 需要下方 #waypoints 中的路标点；random 会在 bounds 盒子中反弹。</div>
     </div>
 
-    <!-- A-Frame 场景 -->
     <a-scene renderer="colorManagement:true" xr-mode-ui="enabled: true">
       <a-entity position="0 1.6 0" camera look-controls wasd-controls="acceleration:0"></a-entity>
-
       <a-sky color="#ECECEC"></a-sky>
       <a-plane rotation="-90 0 0" width="20" height="20" color="#CFCFCF"></a-plane>
 
-      <!-- 小球：圆周轨迹 + 速度曲线 -->
+      <!-- 样条路标（spline 轨迹用；你可以改这些点的位置与数量） -->
+      <a-entity id="waypoints" position="0 1 -2" visible="false">
+        <a-entity position="-1 0  0"></a-entity>
+        <a-entity position=" 1 0  0"></a-entity>
+        <a-entity position=" 1 0 -2"></a-entity>
+        <a-entity position="-1 0 -2"></a-entity>
+      </a-entity>
+
+      <!-- 小球 -->
       <a-sphere id="ball" radius="0.12" color="#4CC3D9"
-        circle-with-speedcurve="radius: 1.4; center: 0 1.2 -2; mode: constant; base: 1.2; amp: 0.6; freq: 0.5; phase: 0.0;">
+        motion-with-speedcurve="
+          trajectory: circle;
+          center: 0 1.2 -2;
+          radius: 1.4;
+          mode: constant; base: 1.2; amp: 0.6; freq: 0.5; phase: 0.0;
+          useBounds: true; bounds: 3 1.5 3;">
       </a-sphere>
     </a-scene>
   </body>
