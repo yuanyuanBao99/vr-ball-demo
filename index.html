@@ -2,13 +2,24 @@
 <html>
   <head>
     <meta charset="utf-8" />
-    <title>VR Ball — Trajectories + Speed Curve</title>
+    <title>VR Ball — Trajectories + Launch + Lifetime</title>
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <!-- A-Frame (可换成本地 libs/aframe.min.js) -->
     <script src="https://aframe.io/releases/1.6.0/aframe.min.js"></script>
+
     <style>
-      .panel{position:fixed;left:12px;top:12px;z-index:9;background:rgba(255,255,255,.92);
-        padding:12px;border-radius:12px;box-shadow:0 8px 24px rgba(0,0,0,.12);
-        font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Arial;max-width:340px}
+      .panel{
+        position:fixed; left:12px; top:12px;
+        z-index:999999;                       /* 确保面板在最上层 */
+        background:rgba(255,255,255,.95);
+        padding:12px; border-radius:12px;
+        box-shadow:0 10px 30px rgba(0,0,0,.18);
+        font:14px/1.4 system-ui,-apple-system,Segoe UI,Roboto,Arial;
+        max-width:360px;
+        pointer-events:auto;
+      }
+      html,body{ margin:0; padding:0; overflow:hidden; }
+
       .row{margin:8px 0}
       .row label{display:block;font-weight:600;margin-bottom:4px}
       .row input[type="range"]{width:100%}
@@ -18,6 +29,7 @@
       .muted{color:#666;font-size:12px}
       .ok{color:#0a7;font-weight:600}.err{color:#c00;font-weight:600}
     </style>
+
     <script>
       // ---------- 工具 ----------
       const clamp01 = x => Math.max(0, Math.min(1, x));
@@ -63,7 +75,6 @@
       function uFromDistance(lut, dist){
         const {u,s,total}=lut;
         let d=wrap(dist,total);
-        // 二分
         let lo=0, hi=s.length-1;
         while(lo<hi){
           const mid=(lo+hi)>>1;
@@ -74,29 +85,67 @@
         return u0 + (d - s0) * (u1 - u0) / (s1 - s0);
       }
 
-      // ---------- 统一运动组件 ----------
+      // ---------- 统一运动组件（含：起点/跳出/寿命） ----------
       AFRAME.registerComponent('motion-with-speedcurve',{
         schema:{
           trajectory:{type:'string',default:'circle'}, // circle|lissajous|spline|random
+
+          // 起点 & 跳出
+          startPos:{type:'vec3',default:{x:-0.3,y:0.2,z:1.5}}, // 屏幕中心(0,0,1.5)左上
+          useStartPos:{type:'boolean',default:true},
+          launch:{type:'boolean',default:true},
+          launchDuration:{type:'number',default:0.6},
+          launchDistance:{type:'number',default:0.5},        // 沿 -Z
+
+          // circle & lissajous 基准中心（会被 shift 到跳出后附近）
           center:{type:'vec3',default:{x:0,y:1.2,z:-2}},
-          // circle
           radius:{type:'number',default:1.4},
-          // lissajous: p(u)=c + [Ax sin(fx u), Ay sin(fy u+π/2), Az sin(fz u+π/3)]
+
+          // lissajous 参数
           lAx:{type:'number',default:1.2}, lAy:{type:'number',default:0.8}, lAz:{type:'number',default:1.0},
           lFx:{type:'number',default:1.0}, lFy:{type:'number',default:1.5}, lFz:{type:'number',default:0.6},
-          // random bounds
+
+          // random 边界
           useBounds:{type:'boolean',default:true},
           bounds:{type:'vec3',default:{x:3,y:1.5,z:3}},
-          // speed curve (初始，可被 UI 改)
+
+          // 速度曲线
           mode:{type:'string',default:'constant'}, base:{type:'number',default:1.2},
-          amp:{type:'number',default:0.6}, freq:{type:'number',default:0.5}, phase:{type:'number',default:0}
+          amp:{type:'number',default:0.6}, freq:{type:'number',default:0.5}, phase:{type:'number',default:0},
+
+          // 寿命
+          lifetimeMin:{type:'number',default:3.0},
+          lifetimeMax:{type:'number',default:6.0},
+          vanishAction:{type:'string',default:'remove'} // remove | hide
         },
+
         init(){
           this.t=0; this.angle=0;
           this.curve=new SpeedCurve({mode:this.data.mode,base:this.data.base,amp:this.data.amp,freq:this.data.freq,phase:this.data.phase});
+
+          const L=this.data;
+          const life = L.lifetimeMin + Math.random() * Math.max(0, L.lifetimeMax - L.lifetimeMin);
+          this.deathT = life;
+          this.launchDone = !L.launch;
+
+          // 初始位置
+          if (L.useStartPos){
+            this.start = new THREE.Vector3(L.startPos.x, L.startPos.y, L.startPos.z);
+            this.el.object3D.position.copy(this.start);
+          } else {
+            this.start = this.el.object3D.position.clone();
+          }
+
+          // 跳出后的参考中心（沿 -Z 推）
+          this.launchDir = new THREE.Vector3(0,0,-1);
+          this.centerShifted = new THREE.Vector3(
+            L.startPos.x, L.startPos.y, L.startPos.z - L.launchDistance
+          );
+
           // random
           this.dir=new THREE.Vector3(1,0.3,0.7).normalize();
           this.noiseT=0;
+
           // spline
           this.spline=null; this.lut=null; this.sDist=0;
           const wp=document.querySelector('#waypoints');
@@ -108,23 +157,57 @@
             if(pts.length>=2){
               this.spline=new THREE.CatmullRomCurve3(pts,true,'centripetal',0.5);
               this.lut=buildArcLUT(this.spline,600);
-              // 可视化
               const geo=new THREE.BufferGeometry().setFromPoints(this.spline.getPoints(300));
               const mat=new THREE.LineBasicMaterial({color:0x888888});
               const line=new THREE.Line(geo,mat); wp.object3D.add(line);
             }
           }
-          // 预置：把球放到起点
-          const c=this.data.center;
-          this.el.object3D.position.set(c.x+this.data.radius, c.y, c.z);
+
+          // 圆周和李萨如默认围绕“跳出后”的中心
+          if (this.data.trajectory==='circle'){
+            this.data.center = {x:this.centerShifted.x, y:this.centerShifted.y, z:this.centerShifted.z};
+          }
         },
+
         update(){
           this.curve.mode=this.data.mode; this.curve.base=this.data.base;
           this.curve.amp=this.data.amp; this.curve.freq=this.data.freq; this.curve.phase=this.data.phase;
         },
+
         tick(time, timeDelta){
           const dt=timeDelta/1000; this.t+=dt;
-          const v=this.curve.eval(this.t); // 线速度 m/s
+
+          // 到时消失
+          if (this.t >= this.deathT){
+            if (this.data.vanishAction==='remove' && this.el.parentNode){
+              this.el.parentNode.removeChild(this.el);
+            } else {
+              this.el.setAttribute('visible','false');
+              this.pause();
+            }
+            return;
+          }
+
+          // Launch：沿 -Z 推出（easeOutCubic）
+          if (!this.launchDone){
+            const u = Math.min(1, this.t / Math.max(1e-6, this.data.launchDuration));
+            const easeOutCubic = (x)=>1-Math.pow(1-x,3);
+            const d = easeOutCubic(u) * this.data.launchDistance;
+            const p = this.start.clone().addScaledVector(this.launchDir, d);
+            this.el.object3D.position.copy(p);
+            if (u>=1) {
+              this.launchDone = true;
+              if (this.data.trajectory==='circle'){
+                const c=this.data.center;
+                const dx=p.x-c.x, dz=p.z-c.z;
+                this.angle = Math.atan2(dz, dx);
+              }
+            }
+            return;
+          }
+
+          // 轨迹阶段
+          const v=this.curve.eval(this.t);
           const c=this.data.center; const pos=this.el.object3D.position;
 
           if(this.data.trajectory==='circle'){
@@ -135,23 +218,19 @@
           }
 
           if(this.data.trajectory==='lissajous'){
-            // p(u)=c+[Ax sin(fx u), Ay sin(fy u+π/2), Az sin(fz u+π/3)]
-            // |dp/du| = sqrt( (Ax*fx cos(fx u))^2 + (Ay*fy cos(...))^2 + (Az*fz cos(...))^2 )
             if(this.u===undefined) this.u=0;
-            // 用两步欧拉以减小误差
             for(let k=0;k<2;k++){
-              const du1=this._duForV(this.u,v,dt/2);
-              this.u+=du1;
+              const du1=this._duForV(this.u,v,dt/2); this.u+=du1;
             }
-            const x = c.x + this.data.lAx*Math.sin(this.data.lFx*this.u);
-            const y = c.y + this.data.lAy*Math.sin(this.data.lFy*this.u + Math.PI/2);
-            const z = c.z + this.data.lAz*Math.sin(this.data.lFz*this.u + Math.PI/3);
+            const x = this.centerShifted.x + this.data.lAx*Math.sin(this.data.lFx*this.u);
+            const y = this.centerShifted.y + this.data.lAy*Math.sin(this.data.lFy*this.u + Math.PI/2);
+            const z = this.centerShifted.z + this.data.lAz*Math.sin(this.data.lFz*this.u + Math.PI/3);
             pos.set(x,y,z);
             return;
           }
 
           if(this.data.trajectory==='spline' && this.spline && this.lut){
-            this.sDist += v*dt; // 累计路程
+            this.sDist += v*dt;
             const u = uFromDistance(this.lut, this.sDist);
             const p = this.spline.getPoint(u);
             pos.copy(p);
@@ -159,7 +238,6 @@
           }
 
           if(this.data.trajectory==='random'){
-            // 抖动方向
             this.noiseT+=dt;
             if(this.noiseT>0.4){ this.noiseT=0;
               const j=new THREE.Vector3((Math.random()-0.5)*0.6,(Math.random()-0.5)*0.6,(Math.random()-0.5)*0.6);
@@ -167,8 +245,8 @@
             }
             const step=v*dt; pos.addScaledVector(this.dir, step);
             if(this.data.useBounds){
-              const min=new THREE.Vector3(c.x-this.data.bounds.x/2,c.y-this.data.bounds.y/2,c.z-this.data.bounds.z/2);
-              const max=new THREE.Vector3(c.x+this.data.bounds.x/2,c.y+this.data.bounds.y/2,c.z+this.data.bounds.z/2);
+              const min=new THREE.Vector3(this.centerShifted.x-this.data.bounds.x/2,this.centerShifted.y-this.data.bounds.y/2,this.centerShifted.z-this.data.bounds.z/2);
+              const max=new THREE.Vector3(this.centerShifted.x+this.data.bounds.x/2,this.centerShifted.y+this.data.bounds.y/2,this.centerShifted.z+this.data.bounds.z/2);
               if(pos.x<min.x||pos.x>max.x){ this.dir.x*=-1; pos.x=THREE.MathUtils.clamp(pos.x,min.x,max.x); }
               if(pos.y<min.y||pos.y>max.y){ this.dir.y*=-1; pos.y=THREE.MathUtils.clamp(pos.y,min.y,max.y); }
               if(pos.z<min.z||pos.z>max.z){ this.dir.z*=-1; pos.z=THREE.MathUtils.clamp(pos.z,min.z,max.z); }
@@ -176,21 +254,25 @@
             return;
           }
         },
+
         _duForV(u,v,dt){
           const Ax=this.data.lAx, Ay=this.data.lAy, Az=this.data.lAz;
           const fx=this.data.lFx, fy=this.data.lFy, fz=this.data.lFz;
           const dx = Ax*fx*Math.cos(fx*u);
           const dy = Ay*fy*Math.cos(fy*u + Math.PI/2);
           const dz = Az*fz*Math.cos(fz*u + Math.PI/3);
-          const dlen = Math.max(1e-6, Math.hypot(dx,dy,dz)); // |dp/du|
-          const du_dt = v / dlen; // 让 |dp/dt| = v
+          const dlen = Math.max(1e-6, Math.hypot(dx,dy,dz));
+          const du_dt = v / dlen;
           return du_dt * dt;
         },
-        // 供外部设置关键帧
-        setKeyframes(arr){ this.curve=new SpeedCurve({mode:'keyframes',keyframes:arr}); this.el.setAttribute('motion-with-speedcurve','mode','keyframes'); }
+
+        setKeyframes(arr){
+          this.curve=new SpeedCurve({mode:'keyframes',keyframes:arr});
+          this.el.setAttribute('motion-with-speedcurve','mode','keyframes');
+        }
       });
 
-      // ---------- 简易 UI 绑定 ----------
+      // ---------- 简易 UI ----------
       window.addEventListener('DOMContentLoaded', ()=>{
         const ball = document.querySelector('#ball');
 
@@ -256,7 +338,9 @@
       });
     </script>
   </head>
+
   <body>
+    <!-- 控制面板 -->
     <div class="panel">
       <div class="row">
         <label>轨迹 (trajectory)</label>
@@ -338,15 +422,16 @@
         </div>
       </div>
 
-      <div class="row muted">提示：spline 需要下方 #waypoints 中的路标点；random 会在 bounds 盒子中反弹。</div>
+      <div class="row muted">提示：spline 需要下方 #waypoints 中的路标点；随机轨迹会在 bounds 盒子中反弹。</div>
     </div>
 
+    <!-- 场景 -->
     <a-scene renderer="colorManagement:true" xr-mode-ui="enabled: true">
       <a-entity position="0 1.6 0" camera look-controls wasd-controls="acceleration:0"></a-entity>
       <a-sky color="#ECECEC"></a-sky>
       <a-plane rotation="-90 0 0" width="20" height="20" color="#CFCFCF"></a-plane>
 
-      <!-- 样条路标（spline 轨迹用；你可以改这些点的位置与数量） -->
+      <!-- 样条路标（spline 轨迹可用；你可以移动/增删这些点） -->
       <a-entity id="waypoints" position="0 1 -2" visible="false">
         <a-entity position="-1 0  0"></a-entity>
         <a-entity position=" 1 0  0"></a-entity>
@@ -354,11 +439,19 @@
         <a-entity position="-1 0 -2"></a-entity>
       </a-entity>
 
-      <!-- 小球 -->
+      <!-- 小球（含：起点、跳出、寿命） -->
       <a-sphere id="ball" radius="0.12" color="#4CC3D9"
         motion-with-speedcurve="
           trajectory: circle;
-          center: 0 1.2 -2;
+          startPos: -0.3 0.2 1.5;    /* 初始点：聊天框左上 */
+          useStartPos: true;
+          launch: true;              /* 先沿 -Z 跳出 */
+          launchDuration: 0.6;
+          launchDistance: 0.5;
+          lifetimeMin: 3;            /* 3–6 秒后自动消失 */
+          lifetimeMax: 6;
+          vanishAction: remove;
+          center: 0 1.2 -2;          /* 轨迹中心（已在 init 中移到跳出后位置） */
           radius: 1.4;
           mode: constant; base: 1.2; amp: 0.6; freq: 0.5; phase: 0.0;
           useBounds: true; bounds: 3 1.5 3;">
